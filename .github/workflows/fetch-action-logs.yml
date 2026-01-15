@@ -1,0 +1,39 @@
+name: Fetch GitHub Actions logs
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Optional run id to fetch logs for (defaults to latest run on main)'
+        required: false
+
+jobs:
+  fetch-logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine run id
+        id: run
+        run: |
+          if [ -n "${{ github.event.inputs.run_id }}" ]; then
+            echo "run_id=${{ github.event.inputs.run_id }}" >> $GITHUB_OUTPUT
+          else
+            echo "Fetching latest run id for branch 'main'..."
+            latest=$(curl -s -H "Authorization: token ${{ secrets.LOG_FETCH_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/actions/runs?branch=main&per_page=1" | jq -r '.workflow_runs[0].id')
+            if [ "$latest" = "null" ] || [ -z "$latest" ]; then
+              echo "No recent runs found" >&2
+              exit 1
+            fi
+            echo "run_id=$latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download logs ZIP
+        run: |
+          RUN_ID=${{ steps.run.outputs.run_id }}
+          echo "Downloading logs for run $RUN_ID"
+          curl -s -L -H "Authorization: token ${{ secrets.LOG_FETCH_TOKEN }}" -o run-$RUN_ID-logs.zip "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/logs"
+
+      - name: Upload logs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: action-logs-${{ steps.run.outputs.run_id }}
+          path: run-${{ steps.run.outputs.run_id }}-logs.zip
