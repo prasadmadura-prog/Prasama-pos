@@ -23,4 +23,4 @@ EXPOSE $PORT
 
 # Step 6: Define the command to run your application
 # This is the command that will be executed when your container starts.
-CMD ["python", "main.py"] # Example for Python, replace main.py with your main application file
+CMD ["python", "your_main_app_file.py"]
