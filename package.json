@@ -25,3 +25,15 @@
     "vite": "^6.2.0"
   }
 }
+{
+  "name": "my-node-app",
+  "version": "1.0.0",
+  "description": "My Node.js application",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js" // <--- This line is important
+  },
+  "dependencies": {
+    // ... your dependencies
+  }
+}
