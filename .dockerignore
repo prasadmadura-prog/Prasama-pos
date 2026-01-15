@@ -9,3 +9,4 @@ README.md
 *.log
 .env
 .local
+prasama_backup_*.json
