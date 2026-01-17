@@ -16,7 +16,7 @@ interface POSProps {
   onCompleteSale: (tx: any) => void;
   onQuickOpenDay: (opening: number) => void;
   posSession: {
-    cart: { product: Product; qty: number; price: number }[];
+    cart: { product: Product; qty: number; price: number; discount: number; discountType: 'AMT' | 'PCT' }[];
     discount: number;
     discountPercent: number;
     paymentMethod: 'CASH' | 'BANK' | 'CARD' | 'CREDIT';
@@ -45,11 +45,14 @@ const POS: React.FC<POSProps> = ({
   const { cart = [], discount = 0, paymentMethod = 'CASH', accountId = 'cash', search = '' } = posSession;
   
   const [lastTx, setLastTx] = useState<any>(null);
-  const [feedbackId, setFeedbackId] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [showCashModal, setShowCashModal] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
+  const [showGlobalDiscountModal, setShowGlobalDiscountModal] = useState(false);
+  const [activeLineDiscountId, setActiveLineDiscountId] = useState<string | null>(null);
+  const [activeLineEditId, setActiveLineEditId] = useState<string | null>(null);
+  
   const [customerSearch, setCustomerSearch] = useState('');
   const [cashReceived, setCashReceived] = useState<string>('');
   
@@ -64,12 +67,35 @@ const POS: React.FC<POSProps> = ({
 
   const fuse = useMemo(() => new Fuse(products, { keys: ['sku', 'name'], threshold: 0.2 }), [products]);
   const filteredProducts = useMemo(() => !search.trim() ? products : fuse.search(search).map(r => r.item), [search, fuse, products]);
-  const filteredCustomers = useMemo(() => customers.filter(c => c && c.name && (c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch))), [customers, customerSearch]);
+  const filteredCustomers = useMemo(() => customers.filter(c => c && c.name && (c.name.toLowerCase().includes(customerSearch.toLowerCase()) || (c.phone && c.phone.includes(customerSearch)))), [customers, customerSearch]);
 
-  const subtotal = useMemo(() => cart.reduce((acc, item) => acc + ((item.price ?? item.product.price) * item.qty), 0), [cart]);
-  const total = Math.max(0, subtotal - discount);
-  const changeDue = Math.max(0, (parseFloat(cashReceived) || 0) - total);
+  // CALCULATION ENGINE
+  const totals = useMemo(() => {
+    let gross = 0;
+    let lineSavings = 0;
+    
+    const items = cart.map(item => {
+      const itemGross = item.qty * item.price;
+      let itemDiscount = 0;
+      if (item.discountType === 'PCT') {
+        itemDiscount = (itemGross * item.discount) / 100;
+      } else {
+        itemDiscount = item.discount;
+      }
+      
+      gross += itemGross;
+      lineSavings += itemDiscount;
+      
+      return { ...item, netPrice: (itemGross - itemDiscount) / item.qty };
+    });
 
+    const netBeforeGlobal = gross - lineSavings;
+    const finalTotal = Math.max(0, netBeforeGlobal - discount);
+    
+    return { gross, lineSavings, netBeforeGlobal, finalTotal };
+  }, [cart, discount]);
+
+  const changeDue = Math.max(0, (parseFloat(cashReceived) || 0) - totals.finalTotal);
   const isDayOpen = activeSession?.status === 'OPEN';
 
   const startAction = (action: () => void) => {
@@ -89,15 +115,12 @@ const POS: React.FC<POSProps> = ({
 
   const addToCart = (product: Product) => {
     if (!isDayOpen || product.stock <= 0) return;
-    setFeedbackId(product.id);
-    setTimeout(() => setFeedbackId(null), 300);
-
     setPosSession((prev: any) => {
       const existing = prev.cart.find((item: any) => item.product.id === product.id);
       if (existing) {
         return { ...prev, cart: prev.cart.map((item: any) => item.product.id === product.id ? { ...item, qty: Math.min(item.qty + 1, product.stock) } : item) };
       }
-      return { ...prev, cart: [{ product, qty: 1, price: product.price }, ...prev.cart] };
+      return { ...prev, cart: [{ product, qty: 1, price: product.price, discount: 0, discountType: 'AMT' }, ...prev.cart] };
     });
   };
 
@@ -111,6 +134,20 @@ const POS: React.FC<POSProps> = ({
         cart: prev.cart.map((item: any) => item.product.id === id ? { ...item, qty: Math.min(newQty, item.product.stock) } : item)
       };
     });
+  };
+
+  const updateLinePrice = (id: string, newPrice: number) => {
+    setPosSession((prev: any) => ({
+      ...prev,
+      cart: prev.cart.map((item: any) => item.product.id === id ? { ...item, price: newPrice } : item)
+    }));
+  };
+
+  const updateLineDiscount = (id: string, value: number, type: 'AMT' | 'PCT') => {
+    setPosSession((prev: any) => ({
+      ...prev,
+      cart: prev.cart.map((item: any) => item.product.id === id ? { ...item, discount: value, discountType: type } : item)
+    }));
   };
 
   const handleScan = (decodedText: string) => {
@@ -135,51 +172,63 @@ const POS: React.FC<POSProps> = ({
     };
   }, [showScanner]);
 
-  const handleQuickAddCustomer = () => {
-    const trimmedName = newCusName.trim();
-    const trimmedPhone = newCusPhone.trim();
-    if (!trimmedName || !trimmedPhone) return;
-
-    setIsProcessing(true);
-    const newCustomer: Customer = {
-      id: `CUS-${Date.now()}`,
-      name: trimmedName.toUpperCase(),
-      phone: trimmedPhone,
-      email: '',
-      address: '',
-      totalCredit: 0,
-      creditLimit: parseFloat(newCusLimit) || 50000
-    };
-
-    onUpsertCustomer(newCustomer);
-    completeTransaction(newCustomer.id);
-    setNewCusName('');
-    setNewCusPhone('');
-    setIsAddingCustomer(false);
-  };
-
   const completeTransaction = (customerId?: string) => {
     setIsProcessing(true);
     const txId = `TX-${Date.now()}-${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
     const txPayload = {
       id: txId,
       type: 'SALE',
-      amount: total,
-      discount: discount,
+      amount: totals.finalTotal,
+      discount: totals.lineSavings + discount,
       paymentMethod,
       accountId: (paymentMethod === 'BANK' || paymentMethod === 'CARD') ? accountId : 'cash',
       customerId,
       description: `Terminal Sale: ${cart.length} line items`,
       date: new Date().toISOString(),
-      items: cart.map(i => ({ productId: i.product.id, quantity: i.qty, price: i.price ?? i.product.price }))
+      items: cart.map(i => {
+        const itemGross = i.qty * i.price;
+        const itemDiscount = i.discountType === 'PCT' ? (itemGross * i.discount) / 100 : i.discount;
+        return { 
+          productId: i.product.id, 
+          quantity: i.qty, 
+          price: i.price, 
+          discount: itemDiscount 
+        };
+      })
     };
     onCompleteSale(txPayload);
-    setLastTx({ ...txPayload, subtotal, total });
+    setLastTx({ ...txPayload, subtotal: totals.gross, total: totals.finalTotal });
     setPosSession({ cart: [], discount: 0, discountPercent: 0, paymentMethod: 'CASH', accountId: 'cash', search: '' });
     setShowCustomerModal(false);
     setShowCashModal(false);
+    setShowGlobalDiscountModal(false);
     setCashReceived('');
     setIsProcessing(false);
+  };
+
+  const handleRegisterNewCustomer = () => {
+    if (!newCusName || !newCusPhone) {
+      alert("Name and Phone are required for new registration.");
+      return;
+    }
+    const newId = `CUS-${Date.now()}`;
+    const customer: Customer = {
+      id: newId,
+      name: newCusName.toUpperCase(),
+      phone: newCusPhone,
+      email: '',
+      address: '',
+      totalCredit: 0,
+      creditLimit: parseFloat(newCusLimit) || 50000,
+    };
+    onUpsertCustomer(customer);
+    completeTransaction(newId);
+    
+    // Reset inputs
+    setNewCusName('');
+    setNewCusPhone('');
+    setNewCusLimit('50000');
+    setIsAddingCustomer(false);
   };
 
   const printReceipt = (tx: any) => {
@@ -194,13 +243,16 @@ const POS: React.FC<POSProps> = ({
 
     const itemsHtml = tx.items?.map((item: any) => {
       const product = products.find(p => p.id === item.productId);
+      const rowGross = item.quantity * item.price;
+      const rowNet = rowGross - (item.discount || 0);
       return `
         <div style="margin-bottom: 8px; border-bottom: 1px dashed #444; padding-bottom: 6px;">
           <div style="font-weight: 800; font-size: 13px; color: #000; text-transform: uppercase;">${product?.name || 'Unknown Item'}</div>
           <div style="display: flex; justify-content: space-between; font-size: 12px; font-weight: 700; margin-top: 2px;">
-            <span>${item.quantity} x ${(Number(item.price) || 0).toLocaleString()}</span>
-            <span>${(Number(item.quantity) * Number(item.price) || 0).toLocaleString()}</span>
+            <span>${item.quantity} x ${Number(item.price).toLocaleString()}</span>
+            <span>${rowGross.toLocaleString()}</span>
           </div>
+          ${item.discount > 0 ? `<div style="text-align: right; font-size: 10px; color: #444;">DISC: -${item.discount.toLocaleString()}</div>` : ''}
         </div>
       `;
     }).join('');
@@ -223,7 +275,6 @@ const POS: React.FC<POSProps> = ({
             .total-section { margin-top: 15px; border-top: 3px double #000; padding-top: 10px; }
             .total-row { display: flex; justify-content: space-between; font-size: 18px; font-weight: 800; }
             .footer { text-align: center; font-size: 10px; margin-top: 25px; font-weight: 800; border-top: 1px dashed #000; padding-top: 10px; }
-            @media print { body { padding: 0; } }
           </style>
         </head>
         <body onload="window.print(); window.close();">
@@ -236,13 +287,17 @@ const POS: React.FC<POSProps> = ({
           </div>
           <div class="meta">
             REF: ${tx.id}<br/>
-            DATE: ${dateStr} | TIME: ${timeStr}<br/>
-            CASHIER: TERMINAL_01
+            DATE: ${dateStr} | TIME: ${timeStr}
           </div>
           <div style="margin-top: 10px;">${itemsHtml}</div>
           <div class="total-section">
+             ${tx.discount > 0 ? `
+             <div style="display: flex; justify-content: space-between; font-size: 12px; font-weight: 700;">
+                <span>SAVINGS:</span>
+                <span>-${tx.discount.toLocaleString()}</span>
+             </div>` : ''}
              <div class="total-row">
-                <span>TOTAL LKR:</span>
+                <span>NET TOTAL:</span>
                 <span>${tx.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
              </div>
              <div style="font-size: 10px; text-align: right; margin-top: 4px; font-weight: 700;">PAID BY: ${tx.paymentMethod}</div>
@@ -285,6 +340,7 @@ const POS: React.FC<POSProps> = ({
 
   return (
     <div className="h-[calc(100vh-10rem)] flex gap-8">
+      {/* Product List Section */}
       <div className="flex-1 flex flex-col gap-6">
         <div className="flex gap-4">
           <div className="relative flex-1">
@@ -310,8 +366,8 @@ const POS: React.FC<POSProps> = ({
             <thead className="bg-slate-50/50 sticky top-0 backdrop-blur-md z-10">
               <tr>
                 <th className="px-8 py-5 text-[11px] font-bold text-slate-400 uppercase tracking-widest">Asset Details</th>
-                <th className="px-8 py-5 text-[11px] font-bold text-slate-400 uppercase tracking-widest text-right">Price</th>
-                <th className="px-8 py-5 text-[11px] font-bold text-slate-400 uppercase tracking-widest text-center">Add</th>
+                <th className="px-8 py-5 text-[11px] font-bold text-slate-400 uppercase tracking-widest text-right">Base Price</th>
+                <th className="px-8 py-5 text-[11px] font-bold text-slate-400 uppercase tracking-widest text-center">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -332,62 +388,156 @@ const POS: React.FC<POSProps> = ({
         </div>
       </div>
 
+      {/* Cart Sidebar */}
       <div className="w-[380px] flex flex-col bg-white rounded-[2rem] border border-slate-200 shadow-xl overflow-hidden">
         <div className="px-6 py-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-          <h3 className="font-black text-slate-900 uppercase tracking-tight text-xs">Active Cart</h3>
-          <span className="bg-indigo-600 text-white px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-tighter">{cart.length} Items</span>
+          <h3 className="font-black text-slate-900 uppercase tracking-tight text-xs">Checkout Terminal</h3>
+          <span className="bg-indigo-600 text-white px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-tighter">{cart.length} SKUs</span>
         </div>
-        <div className="flex-1 overflow-y-auto p-5 space-y-2">
-          {cart.map(item => (
-            <div key={item.product.id} className="flex justify-between items-center p-3 rounded-xl bg-white border border-slate-100 shadow-sm relative group hover:border-indigo-200 transition-all">
-              <div className="min-w-0 flex-1">
-                <p className="text-[12px] font-bold text-slate-800 truncate uppercase tracking-tight">{item.product.name}</p>
-                <div className="flex items-center gap-1 mt-0.5">
-                   <span className="text-[10px] font-mono font-bold text-slate-400">Rs. {item.price.toLocaleString()}</span>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-2">
+          {cart.map(item => {
+            const isDiscounting = activeLineDiscountId === item.product.id;
+            const isEditing = activeLineEditId === item.product.id;
+            const itemGross = item.price * item.qty;
+            const itemDiscountAmt = item.discountType === 'PCT' ? (itemGross * item.discount) / 100 : item.discount;
+            const itemNet = itemGross - itemDiscountAmt;
+            
+            return (
+              <div key={item.product.id} className="p-4 rounded-2xl bg-white border border-slate-100 shadow-sm hover:border-indigo-100 transition-all space-y-3">
+                <div className="flex justify-between items-start">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[12px] font-black text-slate-800 truncate uppercase leading-tight">{item.product.name}</p>
+                    <p className="text-[10px] font-mono font-bold text-slate-400 mt-0.5">
+                      {item.price !== item.product.price ? (
+                         <span className="text-amber-600">Manual Price: Rs. {item.price.toLocaleString()}</span>
+                      ) : (
+                        item.discount > 0 ? (
+                          <>
+                            <span className="line-through">Rs. {item.price.toLocaleString()}</span>
+                            <span className="text-emerald-500 ml-2 font-black">Rs. {(itemNet / item.qty).toLocaleString()}</span>
+                          </>
+                        ) : `Rs. ${item.price.toLocaleString()}`
+                      )}
+                    </p>
+                  </div>
+                  <div className="flex gap-1">
+                    <button 
+                      onClick={() => {
+                        setActiveLineEditId(isEditing ? null : item.product.id);
+                        setActiveLineDiscountId(null);
+                      }}
+                      className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${isEditing ? 'bg-indigo-600 text-white' : 'bg-slate-50 text-slate-400 border border-slate-100 hover:border-indigo-200'}`}
+                    >
+                      ✏️
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setActiveLineDiscountId(isDiscounting ? null : item.product.id);
+                        setActiveLineEditId(null);
+                      }}
+                      className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${item.discount > 0 ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-slate-50 text-slate-400 border border-slate-100'}`}
+                      title="Item Discount"
+                    >
+                      🏷️
+                    </button>
+                  </div>
+                </div>
+
+                {isEditing && (
+                  <div className="p-4 bg-slate-900 rounded-2xl border border-slate-800 space-y-3 animate-in slide-in-from-top-2">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Unit Price</label>
+                        <input 
+                          type="number" 
+                          className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs font-black font-mono text-white outline-none focus:border-indigo-500"
+                          value={item.price}
+                          onChange={(e) => updateLinePrice(item.product.id, parseFloat(e.target.value) || 0)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Quantity</label>
+                        <input 
+                          type="number" 
+                          className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs font-black font-mono text-white outline-none focus:border-indigo-500"
+                          value={item.qty}
+                          onChange={(e) => updateCartQty(item.product.id, parseInt(e.target.value) || 0)}
+                        />
+                      </div>
+                    </div>
+                    <button onClick={() => setActiveLineEditId(null)} className="w-full bg-indigo-600 text-white text-[9px] font-black py-2 rounded-xl uppercase tracking-widest">Confirm Edit</button>
+                  </div>
+                )}
+
+                {isDiscounting && (
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center gap-2 animate-in slide-in-from-top-2">
+                    <div className="flex bg-white rounded-lg border border-slate-200 overflow-hidden shadow-inner">
+                      <button onClick={() => updateLineDiscount(item.product.id, item.discount, 'AMT')} className={`px-2 py-1 text-[8px] font-black uppercase ${item.discountType === 'AMT' ? 'bg-slate-900 text-white' : 'text-slate-400'}`}>Rs</button>
+                      <button onClick={() => updateLineDiscount(item.product.id, item.discount, 'PCT')} className={`px-2 py-1 text-[8px] font-black uppercase ${item.discountType === 'PCT' ? 'bg-slate-900 text-white' : 'text-slate-400'}`}>%</button>
+                    </div>
+                    <input 
+                      type="number" 
+                      className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs font-black font-mono text-indigo-600 outline-none" 
+                      value={item.discount || ''}
+                      placeholder="0"
+                      onChange={(e) => updateLineDiscount(item.product.id, parseFloat(e.target.value) || 0, item.discountType)}
+                      autoFocus
+                    />
+                    <button onClick={() => setActiveLineDiscountId(null)} className="text-[10px] font-black text-slate-400 hover:text-slate-900 px-1">OK</button>
+                  </div>
+                )}
+
+                <div className="flex justify-between items-center pt-2 border-t border-slate-50">
+                  <div className="flex items-center gap-1 bg-slate-50 rounded-lg p-0.5 border border-slate-100">
+                    <button onClick={() => startAction(() => updateCartQty(item.product.id, item.qty - 1))} className="w-7 h-7 rounded-md bg-white flex items-center justify-center font-black text-slate-500 text-xs">-</button>
+                    <span className="text-[11px] font-black w-6 text-center text-slate-700">{item.qty}</span>
+                    <button onClick={() => startAction(() => updateCartQty(item.product.id, item.qty + 1))} className="w-7 h-7 rounded-md bg-white flex items-center justify-center font-black text-slate-500 text-xs">+</button>
+                  </div>
+                  <span className="text-[13px] font-black font-mono text-slate-900">Rs. {itemNet.toLocaleString()}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                 <div className="flex items-center gap-1 bg-slate-50 rounded-lg p-0.5 shadow-inner border border-slate-100">
-                    <button 
-                      onMouseDown={() => startAction(() => updateCartQty(item.product.id, item.qty - 1))}
-                      onMouseUp={stopAction} onMouseLeave={stopAction}
-                      onTouchStart={(e) => { e.preventDefault(); startAction(() => updateCartQty(item.product.id, item.qty - 1)); }}
-                      onTouchEnd={stopAction}
-                      className="w-6 h-6 rounded-md bg-white flex items-center justify-center font-black text-slate-500 select-none hover:bg-rose-50 hover:text-rose-600 transition-colors text-xs"
-                    >-</button>
-                    <span className="text-[11px] font-black w-5 text-center text-slate-700">{item.qty}</span>
-                    <button 
-                      onMouseDown={() => startAction(() => updateCartQty(item.product.id, item.qty + 1))}
-                      onMouseUp={stopAction} onMouseLeave={stopAction}
-                      onTouchStart={(e) => { e.preventDefault(); startAction(() => updateCartQty(item.product.id, item.qty + 1)); }}
-                      onTouchEnd={stopAction}
-                      className="w-6 h-6 rounded-md bg-white flex items-center justify-center font-black text-slate-500 select-none hover:bg-indigo-50 hover:text-indigo-600 transition-colors text-xs"
-                    >+</button>
-                 </div>
-              </div>
-            </div>
-          ))}
+            );
+          })}
           {cart.length === 0 && (
-            <div className="h-full flex flex-col items-center justify-center text-slate-300 py-20">
-              <span className="text-4xl mb-4 grayscale opacity-30">🛒</span>
+            <div className="h-full flex flex-col items-center justify-center text-slate-300 py-24">
+              <span className="text-5xl mb-4 grayscale opacity-20">🛒</span>
               <p className="text-[10px] font-black uppercase tracking-widest">Cart is empty</p>
             </div>
           )}
         </div>
+
         <div className="p-6 space-y-4 bg-slate-50 border-t border-slate-100">
           <div className="grid grid-cols-4 gap-1.5">
             {['CASH', 'BANK', 'CARD', 'CREDIT'].map(m => (
               <button key={m} onClick={() => setPosSession((prev:any) => ({...prev, paymentMethod: m}))} className={`py-2 rounded-lg text-[9px] font-black uppercase transition-all border ${paymentMethod === m ? 'bg-slate-900 border-slate-900 text-white shadow-md' : 'bg-white text-slate-400 border-slate-200 hover:border-slate-300'}`}>{m}</button>
             ))}
           </div>
-          <div className="space-y-1">
+
+          <div className="space-y-1.5">
              <div className="flex justify-between items-center text-slate-400 text-[10px] font-black uppercase tracking-widest">
-                <span>Gross Total</span>
-                <span className="font-mono">Rs. {subtotal.toLocaleString()}</span>
+                <span>Gross Subtotal</span>
+                <span className="font-mono">Rs. {totals.gross.toLocaleString()}</span>
              </div>
-             <div className="flex justify-between items-end text-xl font-black text-slate-900 tracking-tighter">
-                <span className="text-xs uppercase tracking-widest mb-1.5">Net Pay</span>
-                <span className="font-mono">Rs. {total.toLocaleString()}</span>
+             {totals.lineSavings > 0 && (
+               <div className="flex justify-between items-center text-emerald-500 text-[10px] font-black uppercase tracking-widest">
+                  <span>Line Deductions</span>
+                  <span className="font-mono">-Rs. {totals.lineSavings.toLocaleString()}</span>
+               </div>
+             )}
+             <div className="flex justify-between items-center">
+                <button 
+                  onClick={() => setShowGlobalDiscountModal(true)}
+                  className="text-[9px] font-black uppercase tracking-widest px-2 py-1 bg-white border border-slate-200 rounded-lg text-indigo-500 hover:border-indigo-200 transition-all"
+                >
+                  {discount > 0 ? `Cart Disc: -${discount.toLocaleString()}` : '+ Cart Discount'}
+                </button>
+                {discount > 0 && <span className="text-[10px] font-black text-indigo-500 font-mono">-Rs. {discount.toLocaleString()}</span>}
+             </div>
+             
+             <div className="pt-3 border-t border-slate-200 flex justify-between items-end text-2xl font-black text-slate-900 tracking-tighter">
+                <span className="text-xs uppercase tracking-[0.2em] mb-1.5">Net Pay</span>
+                <span className="font-mono">Rs. {totals.finalTotal.toLocaleString()}</span>
              </div>
           </div>
           <button 
@@ -404,8 +554,39 @@ const POS: React.FC<POSProps> = ({
         </div>
       </div>
 
+      {/* Global Discount Modal */}
+      {showGlobalDiscountModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+           <div className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in duration-300">
+              <div className="p-10 border-b border-slate-50 bg-slate-50 flex justify-between items-center">
+                 <h3 className="text-lg font-black text-slate-900 uppercase tracking-tight">Global Discount</h3>
+                 <button onClick={() => setShowGlobalDiscountModal(false)} className="text-slate-300 hover:text-slate-950 text-3xl leading-none">&times;</button>
+              </div>
+              <div className="p-10 space-y-6">
+                 <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Discount Amount (LKR)</label>
+                    <input 
+                      type="number"
+                      autoFocus
+                      className="w-full px-6 py-4 rounded-2xl border-2 border-slate-100 text-2xl font-black font-mono text-center text-indigo-600 outline-none focus:border-indigo-500"
+                      value={discount || ''}
+                      onChange={(e) => setPosSession((prev:any) => ({...prev, discount: parseFloat(e.target.value) || 0}))}
+                      placeholder="0.00"
+                    />
+                 </div>
+                 <div className="grid grid-cols-4 gap-2">
+                    {[50, 100, 500, 1000].map(v => (
+                      <button key={v} onClick={() => setPosSession((prev:any) => ({...prev, discount: v}))} className="py-2 rounded-xl bg-slate-50 border border-slate-200 text-[10px] font-black text-slate-500 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 transition-all">Rs. {v}</button>
+                    ))}
+                 </div>
+                 <button onClick={() => setShowGlobalDiscountModal(false)} className="w-full bg-slate-900 text-white font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest shadow-lg">Apply Reduction</button>
+              </div>
+           </div>
+        </div>
+      )}
+
       {showScanner && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-xl">
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-xl">
           <div className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden animate-in zoom-in duration-300">
             <div className="p-10 flex justify-between items-center border-b border-slate-100">
               <h3 className="text-xl font-black text-slate-900 uppercase tracking-tighter">Optical Scanner</h3>
@@ -432,19 +613,19 @@ const POS: React.FC<POSProps> = ({
               <div className="p-10 space-y-8">
                  <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100 flex justify-between items-center">
                     <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Payable</span>
-                    <span className="text-2xl font-black text-slate-900 font-mono">Rs. {total.toLocaleString()}</span>
+                    <span className="text-2xl font-black text-slate-900 font-mono">Rs. {totals.finalTotal.toLocaleString()}</span>
                  </div>
                  <div className="space-y-4">
                     <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Amount Given by Customer</label>
                     <input autoFocus type="number" className="w-full px-8 py-5 rounded-3xl border-2 border-slate-100 text-4xl font-black font-mono text-center text-indigo-600 outline-none focus:border-indigo-500" placeholder="0.00" value={cashReceived} onChange={e => setCashReceived(e.target.value)} />
                  </div>
-                 <div className={`p-8 rounded-[2.5rem] transition-all border ${parseFloat(cashReceived) >= total ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'}`}>
+                 <div className={`p-8 rounded-[2.5rem] transition-all border ${parseFloat(cashReceived) >= totals.finalTotal ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'}`}>
                     <div className="flex justify-between items-center">
-                       <span className={`text-[10px] font-black uppercase tracking-widest ${parseFloat(cashReceived) >= total ? 'text-emerald-500' : 'text-rose-500'}`}>{parseFloat(cashReceived) >= total ? 'Change Due' : 'Payment Shortfall'}</span>
-                       <span className={`text-3xl font-black font-mono ${parseFloat(cashReceived) >= total ? 'text-emerald-700' : 'text-rose-700'}`}>Rs. {changeDue.toLocaleString()}</span>
+                       <span className={`text-[10px] font-black uppercase tracking-widest ${parseFloat(cashReceived) >= totals.finalTotal ? 'text-emerald-500' : 'text-rose-500'}`}>{parseFloat(cashReceived) >= totals.finalTotal ? 'Change Due' : 'Payment Shortfall'}</span>
+                       <span className={`text-3xl font-black font-mono ${parseFloat(cashReceived) >= totals.finalTotal ? 'text-emerald-700' : 'text-rose-700'}`}>Rs. {changeDue.toLocaleString()}</span>
                     </div>
                  </div>
-                 <button disabled={isProcessing || (parseFloat(cashReceived) || 0) < total} onClick={() => completeTransaction()} className="w-full bg-slate-900 text-white font-black py-5 rounded-[1.5rem] uppercase tracking-widest text-xs disabled:opacity-30 shadow-2xl hover:bg-black transition-all">Finalize Sale</button>
+                 <button disabled={isProcessing || (parseFloat(cashReceived) || 0) < totals.finalTotal} onClick={() => completeTransaction()} className="w-full bg-slate-900 text-white font-black py-5 rounded-[1.5rem] uppercase tracking-widest text-xs disabled:opacity-30 shadow-2xl hover:bg-black transition-all">Finalize Sale</button>
               </div>
            </div>
         </div>
@@ -453,7 +634,7 @@ const POS: React.FC<POSProps> = ({
       {showCustomerModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
           <div className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden animate-in zoom-in duration-300">
-            <div className="p-10 border-b border-slate-50 bg-slate-50 flex justify-between items-center">
+            <div className="p-10 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
               <h3 className="text-xl font-black text-slate-900 uppercase tracking-tighter">Assign Credit Account</h3>
               <button onClick={() => { setShowCustomerModal(false); setIsAddingCustomer(false); }} className="text-slate-300 text-4xl leading-none">&times;</button>
             </div>
@@ -473,10 +654,23 @@ const POS: React.FC<POSProps> = ({
                 </>
               ) : (
                 <div className="space-y-6 animate-in slide-in-from-right-4">
-                  <input className="w-full px-6 py-4 rounded-2xl border border-slate-200 font-bold uppercase" placeholder="Full Client Name" value={newCusName} onChange={e => setNewCusName(e.target.value)} />
-                  <input className="w-full px-6 py-4 rounded-2xl border border-slate-200 font-black font-mono" placeholder="Mobile Number" value={newCusPhone} onChange={e => setNewCusPhone(e.target.value)} />
-                  <button onClick={handleQuickAddCustomer} className="w-full bg-indigo-600 text-white font-black py-5 rounded-2xl uppercase tracking-widest text-[10px] shadow-lg">Register & Sale</button>
-                  <button onClick={() => setIsAddingCustomer(false)} className="w-full text-slate-400 text-[10px] font-black uppercase">Back to Directory</button>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Customer Full Name</label>
+                    <input className="w-full px-6 py-4 rounded-2xl border border-slate-200 font-bold uppercase text-sm" placeholder="E.G. JOHN DOE" value={newCusName} onChange={e => setNewCusName(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Mobile Number</label>
+                    <input className="w-full px-6 py-4 rounded-2xl border border-slate-200 font-black font-mono text-sm" placeholder="+94 XX XXX XXXX" value={newCusPhone} onChange={e => setNewCusPhone(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Internal Credit Limit</label>
+                    <input type="number" className="w-full px-6 py-4 rounded-2xl border border-slate-200 font-black font-mono text-sm" value={newCusLimit} onChange={e => setNewCusLimit(e.target.value)} />
+                  </div>
+                  
+                  <div className="flex flex-col gap-3 pt-4">
+                    <button onClick={handleRegisterNewCustomer} className="w-full bg-indigo-600 text-white font-black py-5 rounded-2xl uppercase tracking-widest text-[11px] shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all">Create & Assign Account</button>
+                    <button onClick={() => setIsAddingCustomer(false)} className="w-full text-slate-400 text-[10px] font-black uppercase py-2">Back to Directory</button>
+                  </div>
                 </div>
               )}
             </div>

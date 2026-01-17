@@ -262,6 +262,55 @@ const Finance: React.FC<FinanceProps> = ({
         </div>
       </div>
 
+      {/* Daily Expense Ledger Section */}
+      <div className="bg-white p-10 rounded-[3.5rem] border border-slate-100 shadow-sm overflow-hidden">
+        <div className="flex justify-between items-center mb-8">
+            <h3 className="text-2xl font-black text-slate-900 uppercase tracking-tighter">Daily Expense Ledger</h3>
+            <span className="text-[10px] font-black text-rose-500 bg-rose-50 px-4 py-1.5 rounded-full uppercase tracking-widest border border-rose-100">
+               Total: Rs. {expenseTransactions.reduce((acc, t) => acc + (Number(t.amount) || 0), 0).toLocaleString()}
+            </span>
+        </div>
+        <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm border-collapse">
+                <thead className="bg-slate-50 text-slate-400">
+                    <tr>
+                        <th className="px-8 py-5 font-black uppercase tracking-widest text-[10px]">Reference / Time</th>
+                        <th className="px-8 py-5 font-black uppercase tracking-widest text-[10px]">Description</th>
+                        <th className="px-8 py-5 font-black uppercase tracking-widest text-[10px]">Ledger</th>
+                        <th className="px-8 py-5 font-black uppercase tracking-widest text-[10px] text-right">Amount</th>
+                        <th className="px-8 py-5 font-black uppercase tracking-widest text-[10px] text-center">Action</th>
+                    </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                    {expenseTransactions.map(tx => (
+                        <tr key={tx.id} className="hover:bg-slate-50 transition-all group">
+                            <td className="px-8 py-5">
+                                <p className="text-[10px] font-black text-slate-900 uppercase font-mono">{tx.id.split('-').slice(-1)}</p>
+                                <p className="text-[9px] text-slate-400 font-bold uppercase">{new Date(tx.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                            </td>
+                            <td className="px-8 py-5">
+                                <p className="text-[12px] font-black text-slate-800 uppercase tracking-tight">{tx.description}</p>
+                            </td>
+                            <td className="px-8 py-5">
+                                <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest px-2 py-1 bg-slate-100 rounded-lg">{tx.paymentMethod}</span>
+                                <p className="text-[8px] text-slate-400 font-bold uppercase mt-1 truncate max-w-[120px]">{getAccountName(tx.accountId)}</p>
+                            </td>
+                            <td className="px-8 py-5 text-right font-black font-mono text-rose-600">
+                                Rs. {(Number(tx.amount) || 0).toLocaleString()}
+                            </td>
+                            <td className="px-8 py-5 text-center">
+                                <button onClick={() => onDeleteTransaction(tx.id)} className="w-8 h-8 rounded-lg bg-white border border-slate-200 text-rose-500 hover:bg-rose-50 transition-all shadow-sm">🗑️</button>
+                            </td>
+                        </tr>
+                    ))}
+                    {expenseTransactions.length === 0 && (
+                        <tr><td colSpan={5} className="px-8 py-16 text-center text-slate-300 font-bold uppercase tracking-widest text-[10px] italic">No expenses logged for this session.</td></tr>
+                    )}
+                </tbody>
+            </table>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
         <div className="bg-white p-10 rounded-[3.5rem] border border-slate-100 shadow-sm">
             <div className="flex justify-between items-center mb-8">
